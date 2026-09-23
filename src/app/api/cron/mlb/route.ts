@@ -225,7 +225,7 @@ async function getPreviousSnapshot(
   return data.data as SnapshotData;
 }
 
-function isFinal(game: MlbGame | undefined) {
+function isFinal(game: MlbGame | undefined): game is MlbGame {
   if (!game) {
     return false;
   }
