@@ -1,0 +1,16 @@
+{
+  "crons": [
+    {
+      "path": "/api/cron/mlb?slot=09",
+      "schedule": "0 15 * * *"
+    },
+    {
+      "path": "/api/cron/mlb?slot=14",
+      "schedule": "0 20 * * *"
+    },
+    {
+      "path": "/api/cron/mlb?slot=17",
+      "schedule": "0 23 * * *"
+    }
+  ]
+}
