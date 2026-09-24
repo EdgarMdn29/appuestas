@@ -3,20 +3,16 @@ import { supabaseAdmin } from "@/lib/supabase/admin";
 
 export const dynamic = "force-dynamic";
 
-type OddsMarket =
-  | "F3_3WAY"
-  | "F5_3WAY"
-  | "FULL_GAME_ML";
-
-type OddsOutcome = "HOME" | "DRAW" | "AWAY";
+type MarketType = "F3_3WAY" | "F5_3WAY" | "FULL_GAME_ML";
+type Outcome = "HOME" | "DRAW" | "AWAY";
 
 type OddsRow = {
   event_id: string;
   commence_time: string;
   home_team: string;
   away_team: string;
-  market: OddsMarket;
-  outcome: OddsOutcome;
+  market: MarketType;
+  outcome: Outcome;
   selection: string;
   bookmaker_key: string;
   bookmaker_title: string;
@@ -32,7 +28,7 @@ type BookmakerOdds = {
 };
 
 type MarketSelection = {
-  outcome: OddsOutcome;
+  outcome: Outcome;
   selection: string;
   marketOdds: number;
   minimumOdds: number;
@@ -41,7 +37,7 @@ type MarketSelection = {
 };
 
 type MarketResult = {
-  market: OddsMarket;
+  market: MarketType;
   selections: MarketSelection[];
 };
 
@@ -55,7 +51,6 @@ type EventResult = {
 
 function calculateMedian(values: number[]): number {
   const sorted = [...values].sort((a, b) => a - b);
-
   const middle = Math.floor(sorted.length / 2);
 
   if (sorted.length % 2 === 1) {
@@ -81,8 +76,7 @@ export async function GET(request: Request) {
 
     const { data, error } = await supabaseAdmin
       .from("mlb_odds_snapshots")
-      .select(
-        `
+      .select(`
         event_id,
         commence_time,
         home_team,
@@ -93,17 +87,9 @@ export async function GET(request: Request) {
         bookmaker_key,
         bookmaker_title,
         price
-        `
-      )
+      `)
       .eq("snapshot_date", snapshotDate)
-      .in("market", [
-        "F3_3WAY",
-        "F5_3WAY",
-        "FULL_GAME_ML",
-      ])
-      .order("commence_time", {
-        ascending: true,
-      });
+      .order("commence_time", { ascending: true });
 
     if (error) {
       return NextResponse.json(
@@ -168,17 +154,12 @@ export async function GET(request: Request) {
         marketsMap.get(key)!.push(row);
       }
 
-      const marketGroups = new Map<
-        OddsMarket,
-        MarketSelection[]
-      >();
+      const marketGroups = new Map<MarketType, MarketSelection[]>();
 
       for (const [key, selectionRows] of marketsMap) {
-        const [market] = key.split(":") as [OddsMarket];
+        const [market] = key.split(":") as [MarketType];
 
-        const prices = selectionRows.map(
-          (row) => Number(row.price)
-        );
+        const prices = selectionRows.map((row) => Number(row.price));
 
         const marketOdds = calculateMedian(prices);
         const minimumOdds = Math.min(...prices);
@@ -188,10 +169,8 @@ export async function GET(request: Request) {
           bookmakerKey: row.bookmaker_key,
           bookmakerTitle: row.bookmaker_title,
           price: Number(row.price),
-          isHighest:
-            Number(row.price) === maximumOdds,
-          isLowest:
-            Number(row.price) === minimumOdds,
+          isHighest: Number(row.price) === maximumOdds,
+          isLowest: Number(row.price) === minimumOdds,
         }));
 
         const selection: MarketSelection = {
@@ -213,16 +192,14 @@ export async function GET(request: Request) {
       const markets: MarketResult[] = [];
 
       for (const [market, selections] of marketGroups) {
-        const outcomeOrder = {
+        const outcomeOrder: Record<Outcome, number> = {
           HOME: 1,
           DRAW: 2,
           AWAY: 3,
         };
 
         selections.sort(
-          (a, b) =>
-            outcomeOrder[a.outcome] -
-            outcomeOrder[b.outcome]
+          (a, b) => outcomeOrder[a.outcome] - outcomeOrder[b.outcome]
         );
 
         markets.push({
@@ -231,17 +208,13 @@ export async function GET(request: Request) {
         });
       }
 
-      const marketOrder = {
-        FULL_GAME_ML: 1,
-        F3_3WAY: 2,
-        F5_3WAY: 3,
+      const marketOrder: Record<MarketType, number> = {
+        F3_3WAY: 1,
+        F5_3WAY: 2,
+        FULL_GAME_ML: 3,
       };
 
-      markets.sort(
-        (a, b) =>
-          marketOrder[a.market] -
-          marketOrder[b.market]
-      );
+      markets.sort((a, b) => marketOrder[a.market] - marketOrder[b.market]);
 
       events.push({
         eventId: event.eventId,
@@ -267,9 +240,7 @@ export async function GET(request: Request) {
         success: false,
         error: "Unexpected error",
         details:
-          error instanceof Error
-            ? error.message
-            : "Unknown error",
+          error instanceof Error ? error.message : "Unknown error",
       },
       { status: 500 }
     );
