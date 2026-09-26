@@ -3,7 +3,11 @@ import { supabaseAdmin } from "@/lib/supabase/admin";
 
 export const dynamic = "force-dynamic";
 
-type MarketType = "F3_3WAY" | "F5_3WAY" | "FULL_GAME_ML";
+type MarketType =
+  | "F3_3WAY"
+  | "F5_3WAY"
+  | "FULL_GAME_ML";
+
 type Outcome = "HOME" | "DRAW" | "AWAY";
 
 type OddsRow = {
@@ -74,6 +78,39 @@ export async function GET(request: Request) {
         timeZone: "America/Mexico_City",
       }).format(new Date());
 
+    // Find the most recent odds capture for this date.
+    const { data: latestCapture, error: latestCaptureError } =
+      await supabaseAdmin
+        .from("mlb_odds_snapshots")
+        .select("captured_at")
+        .eq("snapshot_date", snapshotDate)
+        .order("captured_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+    if (latestCaptureError) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Supabase latest capture query failed",
+          details: latestCaptureError.message,
+        },
+        { status: 500 }
+      );
+    }
+
+    if (!latestCapture) {
+      return NextResponse.json({
+        success: true,
+        snapshotDate,
+        capturedAt: null,
+        totalRows: 0,
+        totalEvents: 0,
+        events: [],
+      });
+    }
+
+    // Read only the latest capture.
     const { data, error } = await supabaseAdmin
       .from("mlb_odds_snapshots")
       .select(`
@@ -89,6 +126,7 @@ export async function GET(request: Request) {
         price
       `)
       .eq("snapshot_date", snapshotDate)
+      .eq("captured_at", latestCapture.captured_at)
       .order("commence_time", { ascending: true });
 
     if (error) {
@@ -108,6 +146,7 @@ export async function GET(request: Request) {
       return NextResponse.json({
         success: true,
         snapshotDate,
+        capturedAt: latestCapture.captured_at,
         totalRows: 0,
         totalEvents: 0,
         events: [],
@@ -154,12 +193,17 @@ export async function GET(request: Request) {
         marketsMap.get(key)!.push(row);
       }
 
-      const marketGroups = new Map<MarketType, MarketSelection[]>();
+      const marketGroups = new Map<
+        MarketType,
+        MarketSelection[]
+      >();
 
       for (const [key, selectionRows] of marketsMap) {
         const [market] = key.split(":") as [MarketType];
 
-        const prices = selectionRows.map((row) => Number(row.price));
+        const prices = selectionRows.map((row) =>
+          Number(row.price)
+        );
 
         const marketOdds = calculateMedian(prices);
         const minimumOdds = Math.min(...prices);
@@ -169,8 +213,10 @@ export async function GET(request: Request) {
           bookmakerKey: row.bookmaker_key,
           bookmakerTitle: row.bookmaker_title,
           price: Number(row.price),
-          isHighest: Number(row.price) === maximumOdds,
-          isLowest: Number(row.price) === minimumOdds,
+          isHighest:
+            Number(row.price) === maximumOdds,
+          isLowest:
+            Number(row.price) === minimumOdds,
         }));
 
         const selection: MarketSelection = {
@@ -199,7 +245,9 @@ export async function GET(request: Request) {
         };
 
         selections.sort(
-          (a, b) => outcomeOrder[a.outcome] - outcomeOrder[b.outcome]
+          (a, b) =>
+            outcomeOrder[a.outcome] -
+            outcomeOrder[b.outcome]
         );
 
         markets.push({
@@ -214,7 +262,11 @@ export async function GET(request: Request) {
         FULL_GAME_ML: 3,
       };
 
-      markets.sort((a, b) => marketOrder[a.market] - marketOrder[b.market]);
+      markets.sort(
+        (a, b) =>
+          marketOrder[a.market] -
+          marketOrder[b.market]
+      );
 
       events.push({
         eventId: event.eventId,
@@ -228,19 +280,25 @@ export async function GET(request: Request) {
     return NextResponse.json({
       success: true,
       snapshotDate,
+      capturedAt: latestCapture.captured_at,
       totalRows: rows.length,
       totalEvents: events.length,
       events,
     });
   } catch (error) {
-    console.error("MLB Market Odds error:", error);
+    console.error(
+      "MLB Market Odds error:",
+      error
+    );
 
     return NextResponse.json(
       {
         success: false,
         error: "Unexpected error",
         details:
-          error instanceof Error ? error.message : "Unknown error",
+          error instanceof Error
+            ? error.message
+            : "Unknown error",
       },
       { status: 500 }
     );

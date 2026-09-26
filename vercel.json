@@ -11,6 +11,18 @@
     {
       "path": "/api/cron/mlb?slot=17",
       "schedule": "0 23 * * *"
+    },
+    {
+      "path": "/api/cron/odds/mlb?slot=09",
+      "schedule": "0 15 * * *"
+    },
+    {
+      "path": "/api/cron/odds/mlb?slot=14",
+      "schedule": "0 20 * * *"
+    },
+    {
+      "path": "/api/cron/odds/mlb?slot=17",
+      "schedule": "0 23 * * *"
     }
   ]
 }

@@ -223,6 +223,49 @@ function getStatusLabel(status: string): string {
   return status.toUpperCase();
 }
 
+function getMexicoCityDate(): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Mexico_City",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+}
+
+function getCurrentMexicoCityHour(): number {
+  const hour = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Mexico_City",
+    hour: "2-digit",
+    hour12: false,
+  }).format(new Date());
+
+  return Number(hour);
+}
+
+function getFixtureSlots(date: string): string[] {
+  const today = getMexicoCityDate();
+
+  if (date < today) {
+    return ["17", "14", "09"];
+  }
+
+  if (date > today) {
+    return ["09", "14", "17"];
+  }
+
+  const hour = getCurrentMexicoCityHour();
+
+  if (hour < 14) {
+    return ["09", "14", "17"];
+  }
+
+  if (hour < 17) {
+    return ["14", "17", "09"];
+  }
+
+  return ["17", "14", "09"];
+}
+
 function findOddsEvent(
   fixture: Fixture,
   oddsEvents: OddsEvent[]
@@ -386,36 +429,48 @@ export default function Home() {
     setExpandedMarket(null);
 
     try {
-      const [fixturesResponse, oddsResponse] =
-        await Promise.all([
-fetch(
-  `/api/fixtures/mlb?date=${selectedDate}&slot=17`,
-  {
-    cache: "no-store",
-  }
-),
-          fetch(
-            `/api/odds-test/mlb?date=${selectedDate}`,
-            {
-              cache: "no-store",
-            }
-          ),
-        ]);
+      const slots = getFixtureSlots(selectedDate);
 
-      if (!fixturesResponse.ok) {
+      let fixturesResponse: Response | null =
+        null;
+
+      let fixturesData: FixturesResponse | null =
+        null;
+
+      for (const slot of slots) {
+        const response = await fetch(
+          `/api/fixtures/mlb?date=${selectedDate}&slot=${slot}`,
+          {
+            cache: "no-store",
+          }
+        );
+
+        if (!response.ok) {
+          continue;
+        }
+
+        const data =
+          (await response.json()) as FixturesResponse;
+
+        if (data.matches) {
+          fixturesResponse = response;
+          fixturesData = data;
+          break;
+        }
+      }
+
+      if (!fixturesResponse || !fixturesData) {
         throw new Error(
-          `Fixtures request failed: ${fixturesResponse.status}`
+          "MLB fixtures request failed."
         );
       }
 
-      const fixturesData =
-        (await fixturesResponse.json()) as FixturesResponse;
-
-if (!fixturesData.matches) {
-  throw new Error(
-    "MLB fixtures request failed."
-  );
-}
+      const oddsResponse = await fetch(
+        `/api/odds-test/mlb?date=${selectedDate}`,
+        {
+          cache: "no-store",
+        }
+      );
 
       setFixtures(fixturesData.matches ?? []);
 
@@ -685,7 +740,7 @@ if (!fixturesData.matches) {
         {selectedLeague === "mlb" && (
           <div className="overflow-hidden border border-gray-900 bg-[#050505]">
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[1250px] border-collapse">
+              <table className="w-full min-w-[1470px] border-collapse">
                 <thead>
                   <tr className="border-b border-gray-900 bg-[#090909]">
                     <th className="px-4 py-3 text-left font-mono text-[10px] font-normal tracking-wider text-gray-600">
@@ -930,27 +985,23 @@ if (!fixturesData.matches) {
                               )}
                             </td>
 
-                            <td className="max-w-[260px] px-4 py-4 align-top">
-                              <div className="space-y-1 font-mono text-[11px]">
-                                <div className="truncate text-gray-400">
-                                  A:{" "}
-                                  {formatPitcher(
-                                    game
-                                      .pitchers
-                                      .away
-                                  )}
-                                </div>
+<td className="w-[440px] min-w-[440px] px-4 py-4 align-top">
+  <div className="space-y-1 font-mono text-[11px]">
+    <div className="whitespace-nowrap text-gray-400">
+      A:{" "}
+      {formatPitcher(
+        game.pitchers.away
+      )}
+    </div>
 
-                                <div className="truncate text-gray-400">
-                                  H:{" "}
-                                  {formatPitcher(
-                                    game
-                                      .pitchers
-                                      .home
-                                  )}
-                                </div>
-                              </div>
-                            </td>
+    <div className="whitespace-nowrap text-gray-400">
+      H:{" "}
+      {formatPitcher(
+        game.pitchers.home
+      )}
+    </div>
+  </div>
+</td>
 
                             <td className="px-3 py-3 align-top">
                               {renderMarketButton(
