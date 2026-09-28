@@ -1,4 +1,5 @@
 export type BetGrade = "⭐⭐⭐" | "⭐⭐" | "⭐" | "NO BET";
+
 export type BetDecision = "BET" | "NO BET";
 
 export type BettingInput = {
@@ -24,8 +25,8 @@ function round(value: number, decimals = 4): number {
 }
 
 export function calculateImpliedProbability(odds: number): number {
-  if (!Number.isFinite(odds) || odds <= 1) {
-    throw new Error("Odds must be greater than 1");
+  if (odds <= 1) {
+    throw new Error("Odds must be greater than 1.");
   }
 
   return 1 / odds;
@@ -33,14 +34,14 @@ export function calculateImpliedProbability(odds: number): number {
 
 export function calculateEdge(
   estimatedProbability: number,
-  impliedProbability: number,
+  impliedProbability: number
 ): number {
   return estimatedProbability - impliedProbability;
 }
 
 export function calculateEV(
   estimatedProbability: number,
-  odds: number,
+  odds: number
 ): number {
   return estimatedProbability * odds - 1;
 }
@@ -48,7 +49,7 @@ export function calculateEV(
 function getGrade(
   ev: number,
   edge: number,
-  confidence: number,
+  confidence: number
 ): BetGrade {
   const evPct = ev * 100;
   const edgePct = edge * 100;
@@ -79,21 +80,26 @@ function getGrade(
   return "NO BET";
 }
 
-function calculateUnits(grade: BetGrade): number {
+function calculateUnits(
+  grade: BetGrade
+): number {
   switch (grade) {
     case "⭐⭐⭐":
       return 1.5;
+
     case "⭐⭐":
       return 1;
+
     case "⭐":
       return 0.5;
+
     default:
       return 0;
   }
 }
 
 export function evaluateBet(
-  input: BettingInput,
+  input: BettingInput
 ): BettingResult {
   const {
     estimatedProbability,
@@ -103,53 +109,62 @@ export function evaluateBet(
   } = input;
 
   if (
-    !Number.isFinite(estimatedProbability) ||
     estimatedProbability < 0 ||
     estimatedProbability > 1
   ) {
     throw new Error(
-      "Estimated probability must be between 0 and 1",
+      "Estimated probability must be between 0 and 1."
     );
   }
 
-  if (!Number.isFinite(confidence)) {
-    throw new Error("Confidence must be a number");
+  if (confidence < 0 || confidence > 100) {
+    throw new Error(
+      "Confidence must be between 0 and 100."
+    );
   }
 
   const impliedProbability =
     calculateImpliedProbability(odds);
 
-  const rawEdge = calculateEdge(
+  const edge = calculateEdge(
     estimatedProbability,
-    impliedProbability,
+    impliedProbability
   );
 
-  const rawEV = calculateEV(
+  const ev = calculateEV(
     estimatedProbability,
-    odds,
+    odds
   );
 
   const adjustedConfidence = Math.max(
     0,
-    Math.min(100, confidence - uncertaintyPenalty),
+    confidence - uncertaintyPenalty
   );
 
-  const grade = getGrade(
-    rawEV,
-    rawEdge,
-    adjustedConfidence,
+  let grade = getGrade(
+    ev,
+    edge,
+    adjustedConfidence
   );
 
-  const decision: BetDecision =
-    grade === "NO BET" ? "NO BET" : "BET";
+  // Hard NO BET filters.
+  if (
+    ev < 0.03 ||
+    edge < 0.04 ||
+    adjustedConfidence < 70
+  ) {
+    grade = "NO BET";
+  }
+
+  const units = calculateUnits(grade);
 
   return {
     impliedProbability: round(impliedProbability),
-    edge: round(rawEdge),
-    ev: round(rawEV),
+    edge: round(edge),
+    ev: round(ev),
     confidence: round(adjustedConfidence, 2),
     grade,
-    decision,
-    units: calculateUnits(grade),
+    decision: grade === "NO BET" ? "NO BET" : "BET",
+    units,
   };
 }
