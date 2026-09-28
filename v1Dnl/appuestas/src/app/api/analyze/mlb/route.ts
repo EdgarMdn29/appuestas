@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { openai } from "@/lib/openai/client";
 import { evaluateBet } from "@/lib/betting/engine";
+import { saveHistoricalPick } from "@/lib/performance/picks";
 
 export const dynamic = "force-dynamic";
 
@@ -267,6 +268,51 @@ export async function GET(request: Request) {
         markets: normalizeOddsForEvent(event.odds),
       };
     });
+
+    /*
+     * Persist only actual BET decisions.
+     *
+     * The betting engine remains authoritative for all
+     * mathematical calculations.
+     */
+    for (const event of normalizedEvents) {
+      for (const market of event.markets) {
+        if (
+          !market.evaluation ||
+          market.evaluation.decision !== "BET" ||
+          market.marketOdds == null
+        ) {
+          continue;
+        }
+
+        const [awayTeam, homeTeam] = event.matchup.split(" @ ");
+
+        await saveHistoricalPick({
+          sport: "MLB",
+          event_id: event.eventId,
+          event_date: snapshotDate,
+          home_team: homeTeam ?? null,
+          away_team: awayTeam ?? null,
+          market: market.market,
+          selection: market.selection,
+          odds: Number(market.marketOdds),
+          estimated_probability: 1 / Number(market.marketOdds),
+          implied_probability: market.evaluation.impliedProbability,
+          edge: market.evaluation.edge,
+          ev: market.evaluation.ev,
+          confidence: market.evaluation.confidence,
+          grade: market.evaluation.grade,
+          decision: market.evaluation.decision,
+          units: market.evaluation.units,
+          result: "PENDING",
+          is_parlay: false,
+          phase: "REGULAR_SEASON",
+          model_version: "provisional",
+          prompt_version: "current",
+          config_version: "current",
+        });
+      }
+    }
 
     const aiInput = {
       date: snapshotDate,
