@@ -125,38 +125,36 @@ function normalizeOddsForEvent(
   rows: OddsRow[],
   pitchers: MatchSnapshot["pitchers"] | null,
 ) {
-  const probability = estimateMlbMoneylineProbability(
-    pitchers ?? { home: null, away: null },
-  );
+  const model = pitchers
+    ? estimateMlbMoneylineProbability({
+        home: pitchers.home,
+        away: pitchers.away,
+      })
+    : null;
 
   return buildMarketOdds(rows).map((market) => {
-    if (!market.marketOdds || market.marketOdds <= 1) {
+    if (!market.marketOdds || !model) {
       return { ...market, evaluation: null };
     }
 
-    // V1 is intentionally limited to full-game moneyline.
-    if (market.market !== "FULL_GAME_ML") {
-      return { ...market, evaluation: null };
+    let estimatedProbability: number | null = null;
+
+    if (market.market === "FULL_GAME_ML") {
+      if (market.outcome === "HOME") estimatedProbability = model.homeProbability;
+      if (market.outcome === "AWAY") estimatedProbability = model.awayProbability;
     }
 
-    const estimatedProbability =
-      market.outcome === "HOME"
-        ? probability.homeProbability
-        : market.outcome === "AWAY"
-          ? probability.awayProbability
-          : 0.5;
+    if (estimatedProbability == null) {
+      return { ...market, evaluation: null };
+    }
 
     const evaluation = evaluateBet({
       estimatedProbability,
       odds: market.marketOdds,
-      confidence: probability.confidence,
-      uncertaintyPenalty: 0,
+      confidence: model.confidence,
     });
 
-    return {
-      ...market,
-      evaluation,
-    };
+    return { ...market, evaluation };
   });
 }
 
@@ -280,7 +278,8 @@ export async function GET(request: Request) {
      * Persist only actual BET decisions.
      *
      * The betting engine remains authoritative for all
-     * mathematical calculations.
+     * mathematical calculations. No probability or EV
+     * calculation is changed here.
      */
     for (const event of normalizedEvents) {
       for (const market of event.markets) {
@@ -303,8 +302,10 @@ export async function GET(request: Request) {
           market: market.market,
           selection: market.selection,
           odds: Number(market.marketOdds),
-          estimated_probability: 1 / Number(market.marketOdds),
-          implied_probability: market.evaluation.impliedProbability,
+          estimated_probability:
+            market.evaluation.estimatedProbability,
+          implied_probability:
+            market.evaluation.impliedProbability,
           edge: market.evaluation.edge,
           ev: market.evaluation.ev,
           confidence: market.evaluation.confidence,
@@ -427,7 +428,9 @@ Return concise structured JSON.
         summary: response.output_text,
         overallDecision: "INSUFFICIENT DATA",
         dataQuality: "LOW",
-        missingInformation: ["Structured AI response could not be parsed."],
+        missingInformation: [
+          "Structured AI response could not be parsed.",
+        ],
         observations: [],
       };
     }
@@ -448,23 +451,20 @@ Return concise structured JSON.
       engine: {
         status: "MLB_V1",
         note:
-          "Independent MLB probability model based on available starting-pitcher ERA, WHIP, W-L record, and home-field advantage.",
+          "Independent MLB V1 probability model is applied before market EV evaluation. Only FULL_GAME_ML is priced in V1; 3-way markets remain unpriced.",
       },
       events: normalizedEvents,
       ai: aiAnalysis,
     });
-  } catch (error) {
-    console.error("MLB analysis error:", error);
+} catch (error) {
+  console.error("MLB analysis error:", error);
 
-    return NextResponse.json(
-      {
-        success: false,
-        error:
-          error instanceof Error
-            ? error.message
-            : "Unknown MLB analysis error",
-      },
-      { status: 500 },
-    );
-  }
+  return NextResponse.json(
+    {
+      success: false,
+      error: JSON.stringify(error),
+    },
+    { status: 500 },
+  );
+}
 }
