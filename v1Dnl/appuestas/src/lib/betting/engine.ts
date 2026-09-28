@@ -9,6 +9,7 @@ export type BettingInput = {
 };
 
 export type BettingResult = {
+  estimatedProbability: number;
   impliedProbability: number;
   edge: number;
   ev: number;
@@ -144,6 +145,7 @@ export function evaluateBet(
     grade === "NO BET" ? "NO BET" : "BET";
 
   return {
+    estimatedProbability: round(estimatedProbability),
     impliedProbability: round(impliedProbability),
     edge: round(rawEdge),
     ev: round(rawEV),

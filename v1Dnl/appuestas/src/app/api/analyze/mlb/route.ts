@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { openai } from "@/lib/openai/client";
 import { evaluateBet } from "@/lib/betting/engine";
+import { estimateMlbMoneylineProbability } from "@/lib/betting/mlb-model";
 import { saveHistoricalPick } from "@/lib/performance/picks";
 
 export const dynamic = "force-dynamic";
@@ -120,30 +121,36 @@ function buildMarketOdds(rows: OddsRow[]) {
   });
 }
 
-function normalizeOddsForEvent(rows: OddsRow[]) {
+function normalizeOddsForEvent(
+  rows: OddsRow[],
+  pitchers: MatchSnapshot["pitchers"] | null,
+) {
+  const probability = estimateMlbMoneylineProbability(
+    pitchers ?? { home: null, away: null },
+  );
+
   return buildMarketOdds(rows).map((market) => {
-    if (!market.marketOdds) {
-      return {
-        ...market,
-        evaluation: null,
-      };
+    if (!market.marketOdds || market.marketOdds <= 1) {
+      return { ...market, evaluation: null };
     }
 
-    /*
-     * Until we have the full sabermetric probability model,
-     * we do NOT invent a probability.
-     *
-     * The engine therefore receives a neutral probability derived
-     * only from the market price. This is explicitly marked as
-     * provisional and must not be treated as a betting edge.
-     */
-    const impliedProbability = 1 / market.marketOdds;
+    // V1 is intentionally limited to full-game moneyline.
+    if (market.market !== "FULL_GAME_ML") {
+      return { ...market, evaluation: null };
+    }
+
+    const estimatedProbability =
+      market.outcome === "HOME"
+        ? probability.homeProbability
+        : market.outcome === "AWAY"
+          ? probability.awayProbability
+          : 0.5;
 
     const evaluation = evaluateBet({
-      estimatedProbability: impliedProbability,
+      estimatedProbability,
       odds: market.marketOdds,
-      confidence: 0,
-      uncertaintyPenalty: 100,
+      confidence: probability.confidence,
+      uncertaintyPenalty: 0,
     });
 
     return {
@@ -265,7 +272,7 @@ export async function GET(request: Request) {
         commenceTime: event.commenceTime,
         pitchers: match?.pitchers ?? null,
         status: match?.status ?? "UNKNOWN",
-        markets: normalizeOddsForEvent(event.odds),
+        markets: normalizeOddsForEvent(event.odds, match?.pitchers ?? null),
       };
     });
 
@@ -307,9 +314,9 @@ export async function GET(request: Request) {
           result: "PENDING",
           is_parlay: false,
           phase: "REGULAR_SEASON",
-          model_version: "provisional",
-          prompt_version: "current",
-          config_version: "current",
+          model_version: "mlb-v1",
+          prompt_version: "mlb-audit-v1",
+          config_version: "mlb-v1",
         });
       }
     }
@@ -439,9 +446,9 @@ Return concise structured JSON.
         totalEvents: normalizedEvents.length,
       },
       engine: {
-        status: "PROVISIONAL",
+        status: "MLB_V1",
         note:
-          "Advanced probability model is not yet populated. No betting edge is inferred from market odds alone.",
+          "Independent MLB probability model based on available starting-pitcher ERA, WHIP, W-L record, and home-field advantage.",
       },
       events: normalizedEvents,
       ai: aiAnalysis,

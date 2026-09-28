@@ -36,6 +36,23 @@ export type HistoricalPick = {
 export async function saveHistoricalPick(
   pick: HistoricalPick,
 ) {
+  const { data: existing, error: existingError } = await supabaseAdmin
+    .from("betting_picks")
+    .select("id")
+    .eq("sport", pick.sport)
+    .eq("event_id", pick.event_id)
+    .eq("event_date", pick.event_date)
+    .eq("market", pick.market)
+    .eq("selection", pick.selection)
+    .eq("model_version", pick.model_version)
+    .eq("prompt_version", pick.prompt_version)
+    .eq("config_version", pick.config_version)
+    .limit(1)
+    .maybeSingle();
+
+  if (existingError) throw existingError;
+  if (existing) return existing;
+
   const { data, error } = await supabaseAdmin
     .from("betting_picks")
     .insert({

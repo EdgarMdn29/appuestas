@@ -233,6 +233,61 @@ function isFinal(game: MlbGame | undefined): game is MlbGame {
   return game.status.toLowerCase() === "final";
 }
 
+async function settlePendingPicks(matches: MlbGame[]) {
+  const finals = matches.filter(
+    (match) =>
+      isFinal(match) &&
+      match.homeTeam.score != null &&
+      match.awayTeam.score != null,
+  );
+
+  if (!finals.length) return 0;
+
+  const eventIds = finals.map((match) => match.id);
+  const { data: picks, error } = await supabaseAdmin
+    .from("betting_picks")
+    .select("id, event_id, selection, market")
+    .eq("sport", "MLB")
+    .eq("result", "PENDING")
+    .eq("market", "FULL_GAME_ML")
+    .in("event_id", eventIds);
+
+  if (error) {
+    throw new Error(`Failed to read pending picks: ${error.message}`);
+  }
+
+  let settled = 0;
+
+  for (const pick of picks ?? []) {
+    const match = finals.find((item) => item.id === pick.event_id);
+    if (!match) continue;
+
+    const winner =
+      Number(match.homeTeam.score) > Number(match.awayTeam.score)
+        ? match.homeTeam.name
+        : match.awayTeam.name;
+
+    const result = pick.selection === winner ? "WIN" : "LOSS";
+
+    const { error: updateError } = await supabaseAdmin
+      .from("betting_picks")
+      .update({
+        result,
+        settled_at: new Date().toISOString(),
+      })
+      .eq("id", pick.id)
+      .eq("result", "PENDING");
+
+    if (updateError) {
+      throw new Error(`Failed to settle pick: ${updateError.message}`);
+    }
+
+    settled++;
+  }
+
+  return settled;
+}
+
 function getBearerToken(req: Request) {
   const authorization = req.headers.get("authorization");
 
@@ -383,6 +438,39 @@ export async function GET(req: Request) {
       );
     }
 
+    const settledCurrent = await settlePendingPicks(matches);
+
+    // Also settle yesterday's completed games.
+    const yesterday = new Date(`${date}T12:00:00-06:00`);
+    yesterday.setDate(yesterday.getDate() - 1);
+    const yesterdayDate = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "America/Mexico_City",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).format(yesterday);
+
+    const { data: yesterdaySnapshot, error: yesterdayError } =
+      await supabaseAdmin
+        .from("mlb_snapshots")
+        .select("data")
+        .eq("snapshot_date", yesterdayDate)
+        .order("captured_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+    if (yesterdayError) {
+      throw new Error(
+        `Failed to read yesterday snapshot: ${yesterdayError.message}`,
+      );
+    }
+
+    const settledYesterday = yesterdaySnapshot?.data
+      ? await settlePendingPicks(
+          (yesterdaySnapshot.data as SnapshotData).matches,
+        )
+      : 0;
+
     return NextResponse.json({
       success: true,
       message: "MLB snapshot created successfully",
@@ -392,6 +480,7 @@ export async function GET(req: Request) {
       reusedFinalMatches,
       refreshedMatches,
       snapshot: savedSnapshot,
+      settledPicks: settledCurrent + settledYesterday,
     });
   } catch (error) {
     console.error("MLB cron error:", error);
