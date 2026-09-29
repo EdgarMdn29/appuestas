@@ -88,8 +88,7 @@ async function fetchJson<T>(url: string): Promise<T> {
 }
 
 async function fetchPitcher(
-  pitcherId: number,
-  pitcherName: string
+  pitcherId: number
 ): Promise<MlbPitcher> {
   const data = await fetchJson<any>(
     `https://statsapi.mlb.com/api/v1/people/${pitcherId}?hydrate=stats(group=[pitching],type=[season])`
@@ -101,7 +100,7 @@ async function fetchPitcher(
 
   return {
     id: pitcherId,
-    name: pitcherName,
+    name: person?.fullName ?? "Unknown",
     stats: {
       era: stats?.era ?? null,
       whip: stats?.whip ?? null,
@@ -141,12 +140,12 @@ async function fetchGame(gamePk: number, scheduledGame: any): Promise<MlbGame> {
     null;
 
   const [homePitcher, awayPitcher] = await Promise.all([
-    homePitcherId && homePitcherName
-      ? fetchPitcher(homePitcherId, homePitcherName)
+    homePitcherId
+      ? fetchPitcher(homePitcherId)
       : Promise.resolve(null),
 
-    awayPitcherId && awayPitcherName
-      ? fetchPitcher(awayPitcherId, awayPitcherName)
+    awayPitcherId
+      ? fetchPitcher(awayPitcherId)
       : Promise.resolve(null),
   ]);
 

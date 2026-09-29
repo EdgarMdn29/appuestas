@@ -260,7 +260,7 @@ export async function GET(request: Request) {
     const normalizedEvents = [...events.values()].map((event) => {
       const match = snapshot.matches.find(
         (item) =>
-          item.homeTeam.name === event.homeTeam ||
+          item.homeTeam.name === event.homeTeam &&
           item.awayTeam.name === event.awayTeam,
       );
 
