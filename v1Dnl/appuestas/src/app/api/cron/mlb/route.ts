@@ -80,7 +80,7 @@ async function fetchJson<T>(url: string): Promise<T> {
 
   if (!response.ok) {
     throw new Error(
-      `MLB API request failed: ${response.status} ${response.statusText} - ${url}`
+      `MLB API request failed: ${response.status} ${response.statusText} - ${url}`,
     );
   }
 
@@ -88,10 +88,10 @@ async function fetchJson<T>(url: string): Promise<T> {
 }
 
 async function fetchPitcher(
-  pitcherId: number
+  pitcherId: number,
 ): Promise<MlbPitcher> {
   const data = await fetchJson<any>(
-    `https://statsapi.mlb.com/api/v1/people/${pitcherId}?hydrate=stats(group=[pitching],type=[season])`
+    `https://statsapi.mlb.com/api/v1/people/${pitcherId}?hydrate=stats(group=[pitching],type=[season])`,
   );
 
   const person = data.people?.[0];
@@ -110,9 +110,12 @@ async function fetchPitcher(
   };
 }
 
-async function fetchGame(gamePk: number, scheduledGame: any): Promise<MlbGame> {
+async function fetchGame(
+  gamePk: number,
+  scheduledGame: any,
+): Promise<MlbGame> {
   const gameData = await fetchJson<any>(
-    `https://statsapi.mlb.com/api/v1.1/game/${gamePk}/feed/live`
+    `https://statsapi.mlb.com/api/v1.1/game/${gamePk}/feed/live`,
   );
 
   const game = gameData.gameData;
@@ -128,16 +131,6 @@ async function fetchGame(gamePk: number, scheduledGame: any): Promise<MlbGame> {
   const awayPitcherId =
     live?.boxscore?.teams?.away?.pitchers?.[0] ??
     game?.probablePitchers?.away?.id;
-
-  const homePitcherName =
-    game?.probablePitchers?.home?.fullName ??
-    game?.probablePitchers?.home?.name ??
-    null;
-
-  const awayPitcherName =
-    game?.probablePitchers?.away?.fullName ??
-    game?.probablePitchers?.away?.name ??
-    null;
 
   const [homePitcher, awayPitcher] = await Promise.all([
     homePitcherId
@@ -197,7 +190,7 @@ async function fetchGame(gamePk: number, scheduledGame: any): Promise<MlbGame> {
 
 async function getPreviousSnapshot(
   date: string,
-  slot: SnapshotSlot
+  slot: SnapshotSlot,
 ): Promise<SnapshotData | null> {
   const previousSlot: SnapshotSlot | null =
     slot === "17" ? "14" : slot === "14" ? "09" : null;
@@ -214,7 +207,9 @@ async function getPreviousSnapshot(
     .maybeSingle();
 
   if (error) {
-    throw new Error(`Failed to read previous snapshot: ${error.message}`);
+    throw new Error(
+      `Failed to read previous snapshot: ${error.message}`,
+    );
   }
 
   if (!data?.data) {
@@ -224,64 +219,100 @@ async function getPreviousSnapshot(
   return data.data as SnapshotData;
 }
 
-function isFinal(game: MlbGame | undefined): game is MlbGame {
-  if (!game) {
-    return false;
-  }
-
-  return game.status.toLowerCase() === "final";
-}
-
-async function settlePendingPicks(matches: MlbGame[]) {
-  const finals = matches.filter(
-    (match) =>
-      isFinal(match) &&
-      match.homeTeam.score != null &&
-      match.awayTeam.score != null,
-  );
-
-  if (!finals.length) return 0;
-
-  const eventIds = finals.map((match) => match.id);
+async function settlePendingPicks() {
   const { data: picks, error } = await supabaseAdmin
     .from("betting_picks")
-    .select("id, event_id, selection, market")
+    .select(
+      "id, event_id, event_date, selection, market",
+    )
     .eq("sport", "MLB")
     .eq("result", "PENDING")
-    .eq("market", "FULL_GAME_ML")
-    .in("event_id", eventIds);
+    .eq("market", "FULL_GAME_ML");
 
   if (error) {
-    throw new Error(`Failed to read pending picks: ${error.message}`);
+    throw new Error(
+      `Failed to read pending picks: ${error.message}`,
+    );
+  }
+
+  if (!picks?.length) {
+    return 0;
   }
 
   let settled = 0;
 
-  for (const pick of picks ?? []) {
-    const match = finals.find((item) => item.id === pick.event_id);
-    if (!match) continue;
+  const dates = [
+    ...new Set(picks.map((pick) => pick.event_date)),
+  ];
 
-    const winner =
-      Number(match.homeTeam.score) > Number(match.awayTeam.score)
-        ? match.homeTeam.name
-        : match.awayTeam.name;
+  for (const date of dates) {
+    const scheduleUrl =
+      `https://statsapi.mlb.com/api/v1/schedule` +
+      `?sportId=1&date=${date}`;
 
-    const result = pick.selection === winner ? "WIN" : "LOSS";
+    const scheduleData = await fetchJson<any>(scheduleUrl);
 
-    const { error: updateError } = await supabaseAdmin
-      .from("betting_picks")
-      .update({
-        result,
-        settled_at: new Date().toISOString(),
-      })
-      .eq("id", pick.id)
-      .eq("result", "PENDING");
+    const games =
+      scheduleData.dates?.flatMap(
+        (dateEntry: any) => dateEntry.games ?? [],
+      ) ?? [];
 
-    if (updateError) {
-      throw new Error(`Failed to settle pick: ${updateError.message}`);
+    for (const pick of picks.filter(
+      (item) => item.event_date === date,
+    )) {
+      const game = games.find(
+        (item: any) =>
+          String(item.gamePk) === pick.event_id,
+      );
+
+      if (!game) {
+        continue;
+      }
+
+      const status = game.status?.abstractGameState;
+
+      if (status !== "Final") {
+        continue;
+      }
+
+      const homeScore = game.teams?.home?.score;
+      const awayScore = game.teams?.away?.score;
+
+      if (homeScore == null || awayScore == null) {
+        continue;
+      }
+
+      const homeTeam = game.teams?.home?.team?.name;
+      const awayTeam = game.teams?.away?.team?.name;
+
+      const winner =
+        Number(homeScore) > Number(awayScore)
+          ? homeTeam
+          : awayTeam;
+
+      const result =
+        pick.selection === winner
+          ? "WIN"
+          : "LOSS";
+
+      const { error: updateError } =
+        await supabaseAdmin
+          .from("betting_picks")
+          .update({
+            result,
+            settled_at: new Date().toISOString(),
+          })
+          .eq("id", pick.id)
+          .eq("result", "PENDING");
+
+      if (updateError) {
+        throw new Error(
+          `Failed to settle pick ${pick.id}: ${updateError.message}`,
+        );
+      }
+
+      settled++;
     }
-
-    settled++;
   }
 
   return settled;
@@ -306,7 +337,7 @@ export async function GET(req: Request) {
         success: false,
         error: "CRON_SECRET is not configured",
       },
-      { status: 500 }
+      { status: 500 },
     );
   }
 
@@ -318,13 +349,16 @@ export async function GET(req: Request) {
         success: false,
         error: "Unauthorized",
       },
-      { status: 401 }
+      { status: 401 },
     );
   }
 
   const { searchParams } = new URL(req.url);
 
-  const date = toISODate(searchParams.get("date") || undefined);
+  const date = toISODate(
+    searchParams.get("date") || undefined,
+  );
+
   const requestedSlot = searchParams.get("slot");
 
   if (!isValidSlot(requestedSlot)) {
@@ -334,7 +368,7 @@ export async function GET(req: Request) {
         error: "Invalid slot",
         message: "slot must be one of: 09, 14, 17",
       },
-      { status: 400 }
+      { status: 400 },
     );
   }
 
@@ -348,24 +382,32 @@ export async function GET(req: Request) {
       `https://statsapi.mlb.com/api/v1/schedule` +
       `?sportId=1&date=${date}`;
 
-    const scheduleData = await fetchJson<any>(scheduleUrl);
+    const scheduleData =
+      await fetchJson<any>(scheduleUrl);
 
     const scheduledGames =
-      scheduleData.dates?.flatMap((dateEntry: any) => dateEntry.games ?? []) ??
-      [];
+      scheduleData.dates?.flatMap(
+        (dateEntry: any) =>
+          dateEntry.games ?? [],
+      ) ?? [];
 
     /*
      * 2. Read the previous snapshot.
-     *
-     * This allows us to freeze games that were already FINAL.
      */
-    const previousSnapshot = await getPreviousSnapshot(date, slot);
+    const previousSnapshot =
+      await getPreviousSnapshot(date, slot);
 
-    const previousMatches = new Map<string, MlbGame>();
+    const previousMatches =
+      new Map<string, MlbGame>();
 
-    previousSnapshot?.matches?.forEach((match) => {
-      previousMatches.set(match.id, match);
-    });
+    previousSnapshot?.matches?.forEach(
+      (match) => {
+        previousMatches.set(
+          match.id,
+          match,
+        );
+      },
+    );
 
     /*
      * 3. Build the new snapshot.
@@ -376,26 +418,22 @@ export async function GET(req: Request) {
     let refreshedMatches = 0;
 
     for (const scheduledGame of scheduledGames) {
-      const gameId = String(scheduledGame.gamePk);
+      const gameId =
+        String(scheduledGame.gamePk);
 
-      const previousMatch = previousMatches.get(gameId);
+      const previousMatch =
+        previousMatches.get(gameId);
 
-      /*
-       * If the previous snapshot already had this game as FINAL,
-       * keep it exactly as it was.
-       */
-      if (isFinal(previousMatch)) {
+      if (previousMatch &&
+          previousMatch.status.toLowerCase() === "final") {
         matches.push(previousMatch);
         reusedFinalMatches++;
         continue;
       }
 
-      /*
-       * Otherwise query MLB for the latest state.
-       */
       const match = await fetchGame(
         scheduledGame.gamePk,
-        scheduledGame
+        scheduledGame,
       );
 
       matches.push(match);
@@ -411,87 +449,72 @@ export async function GET(req: Request) {
 
     /*
      * 4. Save the snapshot.
-     *
-     * Upsert makes the cron idempotent if the same slot is executed again.
      */
-    const { data: savedSnapshot, error: saveError } = await supabaseAdmin
+    const {
+      data: savedSnapshot,
+      error: saveError,
+    } = await supabaseAdmin
       .from("mlb_snapshots")
       .upsert(
         {
           snapshot_date: date,
           snapshot_slot: slot,
-          captured_at: new Date().toISOString(),
+          captured_at:
+            new Date().toISOString(),
           source: "MLB_STATS_API",
           data: snapshot,
         },
         {
-          onConflict: "snapshot_date,snapshot_slot",
-        }
+          onConflict:
+            "snapshot_date,snapshot_slot",
+        },
       )
-      .select("id, snapshot_date, snapshot_slot, captured_at")
+      .select(
+        "id, snapshot_date, snapshot_slot, captured_at",
+      )
       .single();
 
     if (saveError) {
       throw new Error(
-        `Failed to save MLB snapshot: ${saveError.message}`
+        `Failed to save MLB snapshot: ${saveError.message}`,
       );
     }
 
-    const settledCurrent = await settlePendingPicks(matches);
-
-    // Also settle yesterday's completed games.
-    const yesterday = new Date(`${date}T12:00:00-06:00`);
-    yesterday.setDate(yesterday.getDate() - 1);
-    const yesterdayDate = new Intl.DateTimeFormat("en-CA", {
-      timeZone: "America/Mexico_City",
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-    }).format(yesterday);
-
-    const { data: yesterdaySnapshot, error: yesterdayError } =
-      await supabaseAdmin
-        .from("mlb_snapshots")
-        .select("data")
-        .eq("snapshot_date", yesterdayDate)
-        .order("captured_at", { ascending: false })
-        .limit(1)
-        .maybeSingle();
-
-    if (yesterdayError) {
-      throw new Error(
-        `Failed to read yesterday snapshot: ${yesterdayError.message}`,
-      );
-    }
-
-    const settledYesterday = yesterdaySnapshot?.data
-      ? await settlePendingPicks(
-          (yesterdaySnapshot.data as SnapshotData).matches,
-        )
-      : 0;
+    /*
+     * 5. Settle all pending historical MLB picks.
+     */
+    const settledPicks =
+      await settlePendingPicks();
 
     return NextResponse.json({
       success: true,
-      message: "MLB snapshot created successfully",
+      message:
+        "MLB snapshot created successfully",
       date,
       slot,
       totalMatches: matches.length,
       reusedFinalMatches,
       refreshedMatches,
       snapshot: savedSnapshot,
-      settledPicks: settledCurrent + settledYesterday,
+      settledPicks,
     });
   } catch (error) {
-    console.error("MLB cron error:", error);
+    console.error(
+      "MLB cron error:",
+      error,
+    );
 
     return NextResponse.json(
       {
         success: false,
-        error: "MLB snapshot generation failed",
+        error:
+          "MLB snapshot generation failed",
         details:
-          error instanceof Error ? error.message : "Unknown error",
+          error instanceof Error
+            ? error.message
+            : "Unknown error",
       },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }
