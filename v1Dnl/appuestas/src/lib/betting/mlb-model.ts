@@ -29,6 +29,7 @@ function pitcherRating(pitcher: MlbPitcher | null) {
   if (!pitcher) return null;
 
   const { era, whip, wins, losses } = pitcher.stats;
+
   if (era == null || whip == null) return null;
 
   const eraComponent = clamp((4.30 - era) / 1.50, -1, 1);
@@ -38,7 +39,11 @@ function pitcherRating(pitcher: MlbPitcher | null) {
   const winPct = decisions > 0 ? (wins ?? 0) / decisions : 0.5;
   const recordComponent = clamp((winPct - 0.5) / 0.25, -1, 1);
 
-  return eraComponent * 0.60 + whipComponent * 0.30 + recordComponent * 0.10;
+  return (
+    eraComponent * 0.60 +
+    whipComponent * 0.30 +
+    recordComponent * 0.10
+  );
 }
 
 export function estimateMlbMoneylineProbability(
@@ -51,7 +56,7 @@ export function estimateMlbMoneylineProbability(
     return {
       homeProbability: 0.5,
       awayProbability: 0.5,
-      confidence: 35,
+      confidence: 30,
       source: "MLB_V1_PITCHER_MODEL",
     };
   }
@@ -60,18 +65,38 @@ export function estimateMlbMoneylineProbability(
     return {
       homeProbability: 0.5,
       awayProbability: 0.5,
-      confidence: 55,
+      confidence: 45,
       source: "MLB_V1_PITCHER_MODEL",
     };
   }
 
-  const logit = (homeRating - awayRating) * 0.95 + 0.12;
-  const homeProbability = clamp(1 / (1 + Math.exp(-logit)), 0.15, 0.85);
+  // Modest home-field advantage.
+  const logit = (homeRating - awayRating) * 0.95 + 0.08;
+
+  // Keep probabilities conservative while the model only uses
+  // pitcher-level information.
+  const homeProbability = clamp(
+    1 / (1 + Math.exp(-logit)),
+    0.20,
+    0.80,
+  );
+
+  const awayProbability = 1 - homeProbability;
+
+  const ratingGap = Math.abs(homeRating - awayRating);
+
+  // Confidence reflects the amount of information available,
+  // not how large the model's probability happens to be.
+  const confidence = clamp(
+    60 + ratingGap * 15,
+    60,
+    72,
+  );
 
   return {
     homeProbability,
-    awayProbability: 1 - homeProbability,
-    confidence: 82,
+    awayProbability,
+    confidence,
     source: "MLB_V1_PITCHER_MODEL",
   };
 }
