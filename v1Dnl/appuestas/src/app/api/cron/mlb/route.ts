@@ -95,7 +95,6 @@ async function fetchPitcher(
   );
 
   const person = data.people?.[0];
-
   const stats = person?.stats?.[0]?.splits?.[0]?.stat;
 
   return {
@@ -154,9 +153,11 @@ async function fetchGame(
 
   return {
     id: String(gamePk),
+
     date: scheduledGame?.gameDate
       ? toISODate(scheduledGame.gameDate)
       : toISODate(),
+
     startDateTimeUtc,
 
     homeTeam: {
@@ -183,7 +184,6 @@ async function fetchGame(
     },
 
     status,
-
     time: formatMexicoCityTime(startDateTimeUtc),
   };
 }
@@ -219,11 +219,29 @@ async function getPreviousSnapshot(
   return data.data as SnapshotData;
 }
 
+function isFinal(game: MlbGame | undefined): game is MlbGame {
+  if (!game) {
+    return false;
+  }
+
+  return game.status.toLowerCase() === "final";
+}
+
+/**
+ * Settles every pending MLB moneyline pick whose game is already FINAL.
+ *
+ * IMPORTANT:
+ * betting_picks.event_id comes from the odds provider and is NOT
+ * the same identifier as MLB Stats API gamePk.
+ *
+ * Therefore settlement matches by:
+ *   event_date + home_team + away_team
+ */
 async function settlePendingPicks() {
   const { data: picks, error } = await supabaseAdmin
     .from("betting_picks")
     .select(
-      "id, event_id, event_date, selection, market",
+      "id, event_id, event_date, home_team, away_team, selection, market",
     )
     .eq("sport", "MLB")
     .eq("result", "PENDING")
@@ -242,7 +260,11 @@ async function settlePendingPicks() {
   let settled = 0;
 
   const dates = [
-    ...new Set(picks.map((pick) => pick.event_date)),
+    ...new Set(
+      picks
+        .map((pick) => pick.event_date)
+        .filter(Boolean),
+    ),
   ];
 
   for (const date of dates) {
@@ -257,12 +279,19 @@ async function settlePendingPicks() {
         (dateEntry: any) => dateEntry.games ?? [],
       ) ?? [];
 
-    for (const pick of picks.filter(
-      (item) => item.event_date === date,
-    )) {
+    const datePicks = picks.filter(
+      (pick) => pick.event_date === date,
+    );
+
+    for (const pick of datePicks) {
+      if (!pick.home_team || !pick.away_team) {
+        continue;
+      }
+
       const game = games.find(
         (item: any) =>
-          String(item.gamePk) === pick.event_id,
+          item.teams?.home?.team?.name === pick.home_team &&
+          item.teams?.away?.team?.name === pick.away_team,
       );
 
       if (!game) {
@@ -282,8 +311,11 @@ async function settlePendingPicks() {
         continue;
       }
 
-      const homeTeam = game.teams?.home?.team?.name;
-      const awayTeam = game.teams?.away?.team?.name;
+      const homeTeam =
+        game.teams?.home?.team?.name;
+
+      const awayTeam =
+        game.teams?.away?.team?.name;
 
       const winner =
         Number(homeScore) > Number(awayScore)
@@ -319,7 +351,8 @@ async function settlePendingPicks() {
 }
 
 function getBearerToken(req: Request) {
-  const authorization = req.headers.get("authorization");
+  const authorization =
+    req.headers.get("authorization");
 
   if (!authorization?.startsWith("Bearer ")) {
     return null;
@@ -343,7 +376,10 @@ export async function GET(req: Request) {
 
   const providedToken = getBearerToken(req);
 
-  if (!providedToken || providedToken !== cronSecret) {
+  if (
+    !providedToken ||
+    providedToken !== cronSecret
+  ) {
     return NextResponse.json(
       {
         success: false,
@@ -359,14 +395,16 @@ export async function GET(req: Request) {
     searchParams.get("date") || undefined,
   );
 
-  const requestedSlot = searchParams.get("slot");
+  const requestedSlot =
+    searchParams.get("slot");
 
   if (!isValidSlot(requestedSlot)) {
     return NextResponse.json(
       {
         success: false,
         error: "Invalid slot",
-        message: "slot must be one of: 09, 14, 17",
+        message:
+          "slot must be one of: 09, 14, 17",
       },
       { status: 400 },
     );
@@ -376,7 +414,7 @@ export async function GET(req: Request) {
 
   try {
     /*
-     * 1. Get the MLB schedule for the requested date.
+     * 1. Get MLB schedule.
      */
     const scheduleUrl =
       `https://statsapi.mlb.com/api/v1/schedule` +
@@ -392,10 +430,13 @@ export async function GET(req: Request) {
       ) ?? [];
 
     /*
-     * 2. Read the previous snapshot.
+     * 2. Read previous snapshot.
      */
     const previousSnapshot =
-      await getPreviousSnapshot(date, slot);
+      await getPreviousSnapshot(
+        date,
+        slot,
+      );
 
     const previousMatches =
       new Map<string, MlbGame>();
@@ -410,7 +451,7 @@ export async function GET(req: Request) {
     );
 
     /*
-     * 3. Build the new snapshot.
+     * 3. Build new snapshot.
      */
     const matches: MlbGame[] = [];
 
@@ -424,8 +465,7 @@ export async function GET(req: Request) {
       const previousMatch =
         previousMatches.get(gameId);
 
-      if (previousMatch &&
-          previousMatch.status.toLowerCase() === "final") {
+      if (isFinal(previousMatch)) {
         matches.push(previousMatch);
         reusedFinalMatches++;
         continue;
@@ -448,7 +488,7 @@ export async function GET(req: Request) {
     };
 
     /*
-     * 4. Save the snapshot.
+     * 4. Save snapshot.
      */
     const {
       data: savedSnapshot,
@@ -481,7 +521,10 @@ export async function GET(req: Request) {
     }
 
     /*
-     * 5. Settle all pending historical MLB picks.
+     * 5. Settle every pending historical pick.
+     *
+     * This is intentionally independent of the
+     * current snapshot date.
      */
     const settledPicks =
       await settlePendingPicks();
