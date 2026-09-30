@@ -94,6 +94,69 @@ type OddsResponse = {
   events: OddsEvent[];
 };
 
+type AnalysisEvaluation = {
+  estimatedProbability: number;
+  impliedProbability: number;
+  edge: number;
+  ev: number;
+  confidence: number;
+  grade: string;
+  decision: "BET" | "NO BET";
+  units: number;
+};
+
+type AnalysisMarket = {
+  eventId: string;
+  market: string;
+  outcome: "HOME" | "DRAW" | "AWAY";
+  selection: string;
+  marketOdds: number | null;
+  evaluation: AnalysisEvaluation | null;
+};
+
+type AnalysisEvent = {
+  eventId: string;
+  matchup: string;
+  commenceTime: string;
+  justification?: string;
+  markets: AnalysisMarket[];
+};
+
+type MlbAnalysisResponse = {
+  success: boolean;
+  events?: AnalysisEvent[];
+  error?: string;
+};
+
+type AcceptedBet = {
+  eventId: string;
+  market: string;
+  selection: string;
+};
+
+type BetPickPayload = {
+  sport: "MLB";
+  event_id: string;
+  event_date: string;
+  home_team: string;
+  away_team: string;
+  market: string;
+  selection: string;
+  odds: number;
+  estimated_probability: number;
+  implied_probability: number;
+  edge: number;
+  ev: number;
+  confidence: number;
+  grade: string;
+  decision: "BET";
+  units: number;
+  phase: "REGULAR_SEASON" | "PLAYOFFS";
+  model_version: string;
+  prompt_version: string;
+  config_version: string;
+};
+
 type ExpandedMarket = {
   gameId: string;
   market: string;
@@ -152,6 +215,30 @@ function normalizeTeamName(name: string): string {
     .replace(/-/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function formatTeamName(name: string): { city: string; team: string } {
+  const parts = name.trim().split(/\s+/);
+
+  if (parts.length <= 1) {
+    return { city: name, team: "" };
+  }
+
+  const nicknames = new Set([
+    "Red Sox", "White Sox", "Blue Jays", "Diamondbacks",
+    "Guardians", "Orioles", "Phillies", "Braves", "Yankees",
+    "Mets", "Nationals", "Marlins", "Rays", "Royals", "Twins",
+    "Tigers", "Astros", "Rangers", "Angels", "Athletics",
+    "Mariners", "Rockies", "Cubs", "Brewers", "Pirates",
+    "Cardinals", "Reds", "Dodgers", "Padres", "Giants",
+  ]);
+
+  const twoWordNickname = parts.slice(-2).join(" ");
+  if (nicknames.has(twoWordNickname)) {
+    return { city: parts.slice(0, -2).join(" "), team: twoWordNickname };
+  }
+
+  return { city: parts.slice(0, -1).join(" "), team: parts.at(-1) ?? "" };
 }
 
 function formatPitcher(pitcher: Pitcher | null): string {
@@ -449,6 +536,24 @@ export default function Home() {
   const [oddsEvents, setOddsEvents] =
     useState<OddsEvent[]>([]);
 
+  const [analysisEvents, setAnalysisEvents] =
+    useState<AnalysisEvent[]>([]);
+
+  const [analysisLoading, setAnalysisLoading] =
+    useState(false);
+
+  const [analysisError, setAnalysisError] =
+    useState("");
+
+  const [bettingEventId, setBettingEventId] =
+    useState<string | null>(null);
+
+  const [acceptedBets, setAcceptedBets] =
+    useState<AcceptedBet[]>([]);
+
+  const [betError, setBetError] =
+    useState("");
+
   const [loading, setLoading] =
     useState(false);
 
@@ -498,6 +603,8 @@ export default function Home() {
   async function loadMLB() {
     setLoading(true);
     setError("");
+    setAnalysisError("");
+    setBetError("");
     setExpandedMarket(null);
 
     try {
@@ -583,6 +690,183 @@ export default function Home() {
       setLoading(false);
     }
   }
+
+  async function runAnalysis() {
+    setAnalysisLoading(true);
+    setAnalysisError("");
+    setBetError("");
+
+    try {
+      const response = await fetch(
+        `/api/analyze/mlb?date=${selectedDate}`,
+        { cache: "no-store" },
+      );
+      const data = (await response.json()) as MlbAnalysisResponse;
+
+      if (!response.ok || !data.success) {
+        throw new Error(data.error ?? "MLB analysis failed.");
+      }
+
+      const normalizedAnalysis = (data.events ?? []).map((event) => ({
+        ...event,
+        markets: event.markets.map((market) => ({
+          ...market,
+          eventId: event.eventId,
+        })),
+      }));
+
+      setAnalysisEvents(normalizedAnalysis);
+      setAcceptedBets([]);
+      window.localStorage.setItem(
+        `appuestas_mlb_analysis_${selectedDate}`,
+        JSON.stringify(normalizedAnalysis),
+      );
+      window.localStorage.removeItem(
+        `appuestas_mlb_accepted_bets_${selectedDate}`,
+      );
+    } catch (err) {
+      console.error(err);
+      setAnalysisEvents([]);
+      setAnalysisError(err instanceof Error ? err.message : "Unable to run MLB analysis.");
+    } finally {
+      setAnalysisLoading(false);
+    }
+  }
+
+  function getRecommendation(game: Fixture) {
+    const oddsEvent = findOddsEvent(game, oddsEvents);
+    if (!oddsEvent) return null;
+
+    const event = analysisEvents.find((item) => item.eventId === oddsEvent.eventId);
+    if (!event) return null;
+
+    return event.markets
+      .filter((market) => market.evaluation?.decision === "BET")
+      .filter((market) => Number.isFinite(market.marketOdds))
+      .sort((a, b) => (b.evaluation?.ev ?? -Infinity) - (a.evaluation?.ev ?? -Infinity))[0] ?? null;
+  }
+
+  async function acceptBet(game: Fixture, recommendation: AnalysisMarket) {
+    const evaluation = recommendation.evaluation;
+    const odds = recommendation.marketOdds;
+    if (!evaluation || odds == null || evaluation.decision !== "BET") return;
+
+    const acceptedKey = {
+      eventId: recommendation.eventId,
+      market: recommendation.market,
+      selection: recommendation.selection,
+    };
+
+    if (acceptedBets.some(
+      (bet) =>
+        bet.eventId === acceptedKey.eventId &&
+        bet.market === acceptedKey.market &&
+        bet.selection === acceptedKey.selection,
+    )) {
+      return;
+    }
+
+    setBettingEventId(game.id);
+    setBetError("");
+
+    const payload: BetPickPayload = {
+      sport: "MLB",
+      event_id: recommendation.eventId,
+      event_date: selectedDate,
+      home_team: game.homeTeam.name,
+      away_team: game.awayTeam.name,
+      market: recommendation.market,
+      selection: recommendation.selection,
+      odds,
+      estimated_probability: evaluation.estimatedProbability,
+      implied_probability: evaluation.impliedProbability,
+      edge: evaluation.edge,
+      ev: evaluation.ev,
+      confidence: evaluation.confidence,
+      grade: evaluation.grade,
+      decision: "BET",
+      units: evaluation.units,
+      phase: selectedDate >= "2026-09-29" ? "PLAYOFFS" : "REGULAR_SEASON",
+      model_version: "MLB_V1",
+      prompt_version: "MLB_ANALYSIS_V1",
+      config_version: "MLB_V1",
+    };
+
+    try {
+      const response = await fetch("/api/picks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await response.json();
+
+      if (response.status === 409 && data.error === "This pick is already saved.") {
+        const nextAcceptedBets = acceptedBets.some(
+          (bet) =>
+            bet.eventId === acceptedKey.eventId &&
+            bet.market === acceptedKey.market &&
+            bet.selection === acceptedKey.selection,
+        )
+          ? acceptedBets
+          : [...acceptedBets, acceptedKey];
+
+        setAcceptedBets(nextAcceptedBets);
+        window.localStorage.setItem(
+          `appuestas_mlb_accepted_bets_${selectedDate}`,
+          JSON.stringify(nextAcceptedBets),
+        );
+        setBetError("");
+        return;
+      }
+
+      if (!response.ok || !data.success) {
+        throw new Error(data.error ?? "Unable to save bet.");
+      }
+
+      const nextAcceptedBets = [...acceptedBets, acceptedKey];
+      setAcceptedBets(nextAcceptedBets);
+      window.localStorage.setItem(
+        `appuestas_mlb_accepted_bets_${selectedDate}`,
+        JSON.stringify(nextAcceptedBets),
+      );
+    } catch (err) {
+      console.error(err);
+      setBetError(err instanceof Error ? err.message : "Unable to save bet.");
+    } finally {
+      setBettingEventId(null);
+    }
+  }
+
+  useEffect(() => {
+    if (!isLoggedIn || view !== "sport" || selectedLeague !== "mlb") {
+      return;
+    }
+
+    const stored = window.localStorage.getItem(
+      `appuestas_mlb_analysis_${selectedDate}`,
+    );
+
+    if (!stored) {
+      setAnalysisEvents([]);
+      setAcceptedBets([]);
+      return;
+    }
+
+    try {
+      setAnalysisEvents(JSON.parse(stored) as AnalysisEvent[]);
+      const accepted = window.localStorage.getItem(
+        `appuestas_mlb_accepted_bets_${selectedDate}`,
+      );
+      setAcceptedBets(accepted ? (JSON.parse(accepted) as AcceptedBet[]) : []);
+      setAnalysisError("");
+    } catch {
+      window.localStorage.removeItem(
+        `appuestas_mlb_analysis_${selectedDate}`,
+      );
+      setAnalysisEvents([]);
+      setAcceptedBets([]);
+    }
+  }, [isLoggedIn, view, selectedLeague, selectedDate]);
 
   useEffect(() => {
     if (!isLoggedIn || view !== "dashboard") {
@@ -943,6 +1227,19 @@ export default function Home() {
             >
               {loading ? "LOADING..." : "REFRESH"}
             </button>
+
+            <button
+              type="button"
+              onClick={runAnalysis}
+              disabled={analysisLoading || loading || analysisEvents.length > 0}
+              className="border border-gray-800 bg-[#080808] px-3 py-2 font-mono text-xs text-gray-400 hover:border-gray-600 hover:text-gray-200 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {analysisLoading
+                ? "ANALYZING..."
+                : analysisEvents.length > 0
+                  ? "ANALYSIS SAVED"
+                  : "ANALYZE"}
+            </button>
           </div>
         </div>
 
@@ -952,45 +1249,65 @@ export default function Home() {
           </div>
         )}
 
+        {analysisError && (
+          <div className="mb-4 border border-yellow-950 bg-[#0a0904] px-4 py-3 font-mono text-xs text-yellow-600">
+            {analysisError}
+          </div>
+        )}
+
+        {betError && (
+          <div className="mb-4 border border-red-950 bg-[#0b0505] px-4 py-3 font-mono text-xs text-red-400">
+            {betError}
+          </div>
+        )}
+
         {selectedLeague === "mlb" && (
           <div className="overflow-hidden border border-gray-900 bg-[#050505]">
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[1470px] border-collapse">
+              <table className="w-full table-fixed border-collapse">
                 <thead>
                   <tr className="border-b border-gray-900 bg-[#090909]">
-                    <th className="px-4 py-3 text-left font-mono text-[10px] font-normal tracking-wider text-gray-600">
+                    <th className="w-[72px] px-3 py-3 text-left font-mono text-[10px] font-normal tracking-wider text-gray-600">
                       TIME
                     </th>
 
-                    <th className="px-4 py-3 text-left font-mono text-[10px] font-normal tracking-wider text-gray-600">
+                    <th className="w-[125px] px-3 py-3 text-left font-mono text-[10px] font-normal tracking-wider text-gray-600">
                       AWAY
                     </th>
 
-                    <th className="px-4 py-3 text-left font-mono text-[10px] font-normal tracking-wider text-gray-600">
+                    <th className="w-[125px] px-3 py-3 text-left font-mono text-[10px] font-normal tracking-wider text-gray-600">
                       HOME
                     </th>
 
-                    <th className="px-4 py-3 text-center font-mono text-[10px] font-normal tracking-wider text-gray-600">
+                    <th className="w-[68px] px-2 py-3 text-center font-mono text-[10px] font-normal tracking-wider text-gray-600">
                       SCORE
                     </th>
 
-                    <th className="px-4 py-3 text-left font-mono text-[10px] font-normal tracking-wider text-gray-600">
+                    <th className="w-[300px] px-3 py-3 text-left font-mono text-[10px] font-normal tracking-wider text-gray-600">
                       PITCHERS
                     </th>
 
-                    <th className="px-4 py-3 text-center font-mono text-[10px] font-normal tracking-wider text-gray-600">
+                    <th className="w-[125px] px-2 py-3 text-center font-mono text-[10px] font-normal tracking-wider text-gray-600">
                       F3
                     </th>
 
-                    <th className="px-4 py-3 text-center font-mono text-[10px] font-normal tracking-wider text-gray-600">
+                    <th className="w-[125px] px-2 py-3 text-center font-mono text-[10px] font-normal tracking-wider text-gray-600">
                       F5
                     </th>
 
-                    <th className="px-4 py-3 text-center font-mono text-[10px] font-normal tracking-wider text-gray-600">
+                    <th className="w-[125px] px-2 py-3 text-center font-mono text-[10px] font-normal tracking-wider text-gray-600">
                       ML
                     </th>
 
-                    <th className="px-4 py-3 text-right font-mono text-[10px] font-normal tracking-wider text-gray-600">
+                    <th className="w-[210px] px-3 py-3 text-left font-mono text-[10px] font-normal tracking-wider text-gray-600">
+                      SUGERENCIA
+                    </th>
+
+                    <th className="w-[88px] px-2 py-3 text-center font-mono text-[10px] font-normal tracking-wider text-gray-600">
+                      BET
+                    </th>
+
+                    <th className="w-[95px] px-3 py-3 text-right font-mono text-[10px] font-normal tracking-wider text-gray-600">
                       STATUS
                     </th>
                   </tr>
@@ -1000,7 +1317,7 @@ export default function Home() {
                   {loading && (
                     <tr>
                       <td
-                        colSpan={9}
+                        colSpan={10}
                         className="px-4 py-10 text-center font-mono text-xs text-gray-600"
                       >
                         Loading MLB data...
@@ -1103,25 +1420,18 @@ export default function Home() {
                                 —
                               </span>
                             ) : (
-                              <div className="flex items-center justify-center gap-3 font-mono text-xs">
-                                <span className="text-gray-300">
-                                  {getCompactOdds(
-                                    away
-                                  )}
+                              <div className="grid grid-cols-3 gap-1 font-mono text-[10px]">
+                                <span className="text-center">
+                                  <span className="block text-[8px] text-fuchsia-500">AWAY</span>
+                                  <span className="text-fuchsia-400">{getCompactOdds(away)}</span>
                                 </span>
-
-                                {draw && (
-                                  <span className="text-gray-500">
-                                    {getCompactOdds(
-                                      draw
-                                    )}
-                                  </span>
-                                )}
-
-                                <span className="text-gray-300">
-                                  {getCompactOdds(
-                                    home
-                                  )}
+                                <span className="text-center">
+                                  <span className="block text-[8px] text-gray-700">DRAW</span>
+                                  <span className="text-gray-500">{getCompactOdds(draw)}</span>
+                                </span>
+                                <span className="text-center">
+                                  <span className="block text-[8px] text-blue-500">HOME</span>
+                                  <span className="text-blue-400">{getCompactOdds(home)}</span>
                                 </span>
                               </div>
                             )}
@@ -1136,47 +1446,37 @@ export default function Home() {
                               {game.time}
                             </td>
 
-                            <td className="px-4 py-4 align-top">
-                              <div className="flex items-center gap-2">
+                            <td className="w-[125px] px-3 py-4 align-top">
+                              <div className="flex items-start gap-2">
                                 {game.awayTeam.logo && (
-                                  <img
-                                    src={
-                                      game.awayTeam
-                                        .logo
-                                    }
-                                    alt=""
-                                    className="h-5 w-5 object-contain"
-                                  />
+                                  <img src={game.awayTeam.logo} alt="" className="mt-0.5 h-5 w-5 shrink-0 object-contain" />
                                 )}
-
-                                <span className="font-mono text-xs text-gray-300">
-                                  {
-                                    game.awayTeam
-                                      .name
-                                  }
-                                </span>
+                                {(() => {
+                                  const team = formatTeamName(game.awayTeam.name);
+                                  return (
+                                    <span className="min-w-0 font-mono text-[11px] leading-tight text-gray-300">
+                                      <span className="block truncate">{team.city}</span>
+                                      <span className="block truncate text-fuchsia-300">{team.team}</span>
+                                    </span>
+                                  );
+                                })()}
                               </div>
                             </td>
 
-                            <td className="px-4 py-4 align-top">
-                              <div className="flex items-center gap-2">
+                            <td className="w-[125px] px-3 py-4 align-top">
+                              <div className="flex items-start gap-2">
                                 {game.homeTeam.logo && (
-                                  <img
-                                    src={
-                                      game.homeTeam
-                                        .logo
-                                    }
-                                    alt=""
-                                    className="h-5 w-5 object-contain"
-                                  />
+                                  <img src={game.homeTeam.logo} alt="" className="mt-0.5 h-5 w-5 shrink-0 object-contain" />
                                 )}
-
-                                <span className="font-mono text-xs text-gray-300">
-                                  {
-                                    game.homeTeam
-                                      .name
-                                  }
-                                </span>
+                                {(() => {
+                                  const team = formatTeamName(game.homeTeam.name);
+                                  return (
+                                    <span className="min-w-0 font-mono text-[11px] leading-tight text-gray-300">
+                                      <span className="block truncate">{team.city}</span>
+                                      <span className="block truncate text-blue-300">{team.team}</span>
+                                    </span>
+                                  );
+                                })()}
                               </div>
                             </td>
 
@@ -1200,16 +1500,16 @@ export default function Home() {
                               )}
                             </td>
 
-<td className="w-[440px] min-w-[440px] px-4 py-4 align-top">
-  <div className="space-y-1 font-mono text-[11px]">
-    <div className="whitespace-nowrap text-gray-400">
+<td className="w-[300px] px-3 py-4 align-top">
+  <div className="space-y-1 font-mono text-[10px] leading-tight">
+    <div className="text-gray-400">
       A:{" "}
       {formatPitcher(
         game.pitchers.away
       )}
     </div>
 
-    <div className="whitespace-nowrap text-gray-400">
+    <div className="text-gray-400">
       H:{" "}
       {formatPitcher(
         game.pitchers.home
@@ -1239,6 +1539,62 @@ export default function Home() {
                               )}
                             </td>
 
+                            <td className="w-[210px] px-4 py-4 align-top">
+                              {(() => {
+                                const recommendation = getRecommendation(game);
+
+                                if (!analysisEvents.length) {
+                                  return <span className="font-mono text-[10px] text-gray-700">—</span>;
+                                }
+
+                                if (!recommendation?.evaluation) {
+                                  return <span className="font-mono text-[10px] text-gray-600">NO BET</span>;
+                                }
+
+                                const evaluation = recommendation.evaluation;
+
+                                return (
+                                  <div className="min-w-0">
+                                    <div className="font-mono text-[11px] text-gray-300">
+                                      {MARKET_LABELS[recommendation.market] ?? recommendation.market} · {recommendation.selection}
+                                    </div>
+                                    <div className="mt-1 font-mono text-[10px] text-gray-600">
+                                      EV {(evaluation.ev * 100).toFixed(1)}% · EDGE {(evaluation.edge * 100).toFixed(1)}% · {evaluation.grade}
+                                    </div>
+                                  </div>
+                                );
+                              })()}
+                            </td>
+
+                            <td className="w-[88px] px-2 py-4 text-center align-middle">
+                              {(() => {
+                                const recommendation = getRecommendation(game);
+
+                                if (!recommendation?.evaluation) {
+                                  return <span className="font-mono text-[10px] text-gray-700">—</span>;
+                                }
+
+                                const busy = bettingEventId === game.id;
+                                const accepted = acceptedBets.some(
+                                  (bet) =>
+                                    bet.eventId === recommendation.eventId &&
+                                    bet.market === recommendation.market &&
+                                    bet.selection === recommendation.selection,
+                                );
+
+                                return (
+                                  <button
+                                    type="button"
+                                    disabled={busy || accepted}
+                                    onClick={() => acceptBet(game, recommendation)}
+                                    className="w-[78px] border border-gray-700 bg-[#090909] px-2 py-2 font-mono text-[9px] text-gray-300 hover:border-gray-500 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+                                  >
+                                    {busy ? "..." : accepted ? "BET SAVED" : "BET"}
+                                  </button>
+                                );
+                              })()}
+                            </td>
+
                             <td className="whitespace-nowrap px-4 py-4 text-right align-top">
                               <span
                                 className={`font-mono text-[10px] ${getStatusClass(
@@ -1255,7 +1611,7 @@ export default function Home() {
                           {expandedForGame && (
                             <tr className="border-b border-gray-800 bg-[#080808]">
                               <td
-                                colSpan={9}
+                                colSpan={10}
                                 className="px-6 py-4"
                               >
                                 {(() => {
@@ -1276,8 +1632,54 @@ export default function Home() {
                                     );
                                   }
 
+                                  const analysisEvent = analysisEvents.find(
+                                    (item) => item.eventId === oddsEvent?.eventId,
+                                  );
+                                  const selectedAnalysis =
+                                    analysisEvent?.markets.find(
+                                      (market) => market.market === expandedForGame,
+                                    );
+                                  const recommendation = analysisEvent?.markets
+                                    .filter((market) => market.evaluation?.decision === "BET")
+                                    .filter((market) => Number.isFinite(market.marketOdds))
+                                    .sort(
+                                      (a, b) =>
+                                        (b.evaluation?.ev ?? -Infinity) -
+                                        (a.evaluation?.ev ?? -Infinity),
+                                    )[0] ?? null;
+
                                   return (
                                     <div>
+                                      {recommendation?.evaluation && (
+                                        <div className="mb-5 border border-gray-900 bg-[#050505] px-4 py-4">
+                                          <div className="mb-2 font-mono text-[10px] uppercase tracking-wider text-gray-600">
+                                            ANALYSIS / SUGGESTION
+                                          </div>
+                                          <div className="font-mono text-xs text-gray-200">
+                                            {MARKET_LABELS[recommendation.market] ?? recommendation.market} · {recommendation.selection}
+                                          </div>
+                                          <div className="mt-2 font-mono text-[10px] text-gray-500">
+                                            EV {(recommendation.evaluation.ev * 100).toFixed(1)}% · EDGE {(recommendation.evaluation.edge * 100).toFixed(1)}% · {recommendation.evaluation.grade}
+                                          </div>
+                                          {analysisEvent?.justification ? (
+                                            <div className="mt-3 max-w-4xl">
+                                              <div className="mb-1 font-mono text-[9px] uppercase tracking-wider text-gray-600">
+                                                WHY THIS BET
+                                              </div>
+                                              <div className="font-mono text-[11px] leading-relaxed text-gray-400">
+                                                {analysisEvent.justification}
+                                              </div>
+                                            </div>
+                                          ) : null}
+                                        </div>
+                                      )}
+
+                                      {selectedAnalysis?.evaluation && (
+                                        <div className="mb-5 font-mono text-[10px] text-gray-600">
+                                          {MARKET_LABELS[expandedForGame] ?? expandedForGame}: estimated {(selectedAnalysis.evaluation.estimatedProbability * 100).toFixed(1)}% · implied {(selectedAnalysis.evaluation.impliedProbability * 100).toFixed(1)}% · edge {(selectedAnalysis.evaluation.edge * 100).toFixed(1)}% · EV {(selectedAnalysis.evaluation.ev * 100).toFixed(1)}%
+                                        </div>
+                                      )}
+
                                       <div className="mb-3 flex items-center justify-between">
                                         <div className="font-mono text-[10px] uppercase tracking-wider text-gray-600">
                                           {
@@ -1353,9 +1755,14 @@ export default function Home() {
           </div>
         )}
 
-          <div className="mt-4 font-mono text-[10px] text-gray-700">
-            Market odds = median reference bookmaker price.
-            Click F3, F5 or ML to view bookmaker detail.
+          <div className="mt-4 border-t border-gray-900 pt-4 font-mono text-[10px] leading-relaxed text-gray-600">
+            <div className="mb-1 uppercase tracking-wider text-gray-700">LEGEND</div>
+            <div>Market odds = median reference bookmaker price.</div>
+            <div>EV — Expected Value: estimated return advantage based on the model probability and available odds.</div>
+            <div>EDGE — Difference between the model estimated probability and the market implied probability.</div>
+            <div>ERA — Earned Run Average: earned runs allowed per 9 innings.</div>
+            <div>WHIP — Walks + Hits per Inning Pitched: walks and hits allowed per inning.</div>
+            <div className="mt-1">Click F3, F5 or ML to view bookmaker detail.</div>
           </div>
         </section>
       )}

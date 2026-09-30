@@ -2,8 +2,11 @@ import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { openai } from "@/lib/openai/client";
 import { evaluateBet } from "@/lib/betting/engine";
-import { estimateMlbMoneylineProbability } from "@/lib/betting/mlb-model";
-import { saveHistoricalPick } from "@/lib/performance/picks";
+import {
+  estimateMlbMoneylineProbability,
+  estimateMlbThreeWayProbability,
+  type MlbPhase,
+} from "@/lib/betting/mlb-model";
 
 export const dynamic = "force-dynamic";
 
@@ -82,6 +85,12 @@ function median(values: number[]) {
   return (sorted[middle - 1] + sorted[middle]) / 2;
 }
 
+function inferMlbPhase(snapshotDate: string): MlbPhase {
+  // 2026 postseason begins September 29. Keep the phase explicit so the
+  // model does not silently apply a playoff adjustment to regular-season data.
+  return snapshotDate >= "2026-09-29" ? "PLAYOFFS" : "REGULAR_SEASON";
+}
+
 function round(value: number, decimals = 4) {
   const factor = 10 ** decimals;
   return Math.round(value * factor) / factor;
@@ -124,23 +133,29 @@ function buildMarketOdds(rows: OddsRow[]) {
 function normalizeOddsForEvent(
   rows: OddsRow[],
   pitchers: MatchSnapshot["pitchers"] | null,
+  phase: MlbPhase,
 ) {
-  const model = pitchers
-    ? estimateMlbMoneylineProbability({
-        home: pitchers.home,
-        away: pitchers.away,
-      })
-    : null;
-
   return buildMarketOdds(rows).map((market) => {
-    if (!market.marketOdds || !model) {
+    if (!market.marketOdds || !pitchers) {
       return { ...market, evaluation: null };
     }
 
     let estimatedProbability: number | null = null;
+    let confidence = 30;
 
     if (market.market === "FULL_GAME_ML") {
+      const model = estimateMlbMoneylineProbability(pitchers, phase);
+      confidence = model.confidence;
       if (market.outcome === "HOME") estimatedProbability = model.homeProbability;
+      if (market.outcome === "AWAY") estimatedProbability = model.awayProbability;
+    }
+
+    if (market.market === "F3_3WAY" || market.market === "F5_3WAY") {
+      const innings = market.market === "F3_3WAY" ? 3 : 5;
+      const model = estimateMlbThreeWayProbability(pitchers, innings, phase);
+      confidence = model.confidence;
+      if (market.outcome === "HOME") estimatedProbability = model.homeProbability;
+      if (market.outcome === "DRAW") estimatedProbability = model.drawProbability;
       if (market.outcome === "AWAY") estimatedProbability = model.awayProbability;
     }
 
@@ -151,7 +166,7 @@ function normalizeOddsForEvent(
     const evaluation = evaluateBet({
       estimatedProbability,
       odds: market.marketOdds,
-      confidence: model.confidence,
+      confidence,
     });
 
     return { ...market, evaluation };
@@ -228,6 +243,7 @@ export async function GET(request: Request) {
     }
 
     const snapshot = latestMlbSnapshot.data as Snapshot;
+    const phase = inferMlbPhase(snapshotDate);
     const typedOddsRows = (oddsRows ?? []) as OddsRow[];
 
     const events = new Map<
@@ -270,60 +286,14 @@ export async function GET(request: Request) {
         commenceTime: event.commenceTime,
         pitchers: match?.pitchers ?? null,
         status: match?.status ?? "UNKNOWN",
-        markets: normalizeOddsForEvent(event.odds, match?.pitchers ?? null),
+        markets: normalizeOddsForEvent(event.odds, match?.pitchers ?? null, phase),
       };
     });
 
-    /*
-     * Persist only actual BET decisions.
-     *
-     * The betting engine remains authoritative for all
-     * mathematical calculations. No probability or EV
-     * calculation is changed here.
-     */
-    for (const event of normalizedEvents) {
-      for (const market of event.markets) {
-        if (
-          !market.evaluation ||
-          market.evaluation.decision !== "BET" ||
-          market.marketOdds == null
-        ) {
-          continue;
-        }
-
-        const [awayTeam, homeTeam] = event.matchup.split(" @ ");
-
-        await saveHistoricalPick({
-          sport: "MLB",
-          event_id: event.eventId,
-          event_date: snapshotDate,
-          home_team: homeTeam ?? null,
-          away_team: awayTeam ?? null,
-          market: market.market,
-          selection: market.selection,
-          odds: Number(market.marketOdds),
-          estimated_probability:
-            market.evaluation.estimatedProbability,
-          implied_probability:
-            market.evaluation.impliedProbability,
-          edge: market.evaluation.edge,
-          ev: market.evaluation.ev,
-          confidence: market.evaluation.confidence,
-          grade: market.evaluation.grade,
-          decision: market.evaluation.decision,
-          units: market.evaluation.units,
-          result: "PENDING",
-          is_parlay: false,
-          phase: "REGULAR_SEASON",
-          model_version: "mlb-v1",
-          prompt_version: "mlb-audit-v1",
-          config_version: "mlb-v1",
-        });
-      }
-    }
 
     const aiInput = {
       date: snapshotDate,
+      phase,
       source: "APPuestas MLB Betting Engine",
       instructions: [
         "Analyze only the supplied data.",
@@ -435,6 +405,48 @@ Return concise structured JSON.
       };
     }
 
+    const aiObservations =
+      typeof aiAnalysis === "object" &&
+      aiAnalysis !== null &&
+      "observations" in aiAnalysis &&
+      Array.isArray((aiAnalysis as { observations?: unknown }).observations)
+        ? (aiAnalysis as {
+            observations: Array<{
+              eventId: string;
+              observation: string;
+              supportedByData: boolean;
+            }>;
+          }).observations
+        : [];
+
+    const eventsWithJustification = normalizedEvents.map((event) => {
+      const supportedObservations = aiObservations
+        .filter(
+          (observation) =>
+            observation.eventId === event.eventId &&
+            observation.supportedByData,
+        )
+        .map((observation) => observation.observation.trim())
+        .filter(Boolean);
+
+      const recommendation = event.markets
+        .filter((market) => market.evaluation?.decision === "BET")
+        .filter((market) => Number.isFinite(market.marketOdds))
+        .sort(
+          (a, b) =>
+            (b.evaluation?.ev ?? -Infinity) -
+            (a.evaluation?.ev ?? -Infinity),
+        )[0];
+
+      const justification =
+        supportedObservations.slice(0, 2).join(" ") ||
+        (recommendation?.evaluation
+          ? `${recommendation.selection} is the selected outcome because the V1 model estimates ${(recommendation.evaluation.estimatedProbability * 100).toFixed(1)}% probability versus ${(recommendation.evaluation.impliedProbability * 100).toFixed(1)}% implied by the reference odds, producing ${(recommendation.evaluation.edge * 100).toFixed(1)}% edge and ${(recommendation.evaluation.ev * 100).toFixed(1)}% EV.`
+          : "No supported +EV recommendation was produced for this game.");
+
+      return { ...event, justification };
+    });
+
     return NextResponse.json({
       success: true,
       date: snapshotDate,
@@ -451,9 +463,9 @@ Return concise structured JSON.
       engine: {
         status: "MLB_V1",
         note:
-          "Independent MLB V1 probability model is applied before market EV evaluation. Only FULL_GAME_ML is priced in V1; 3-way markets remain unpriced.",
+          "Independent MLB V1 probability model is applied before market EV evaluation. FULL_GAME_ML, F3_3WAY, and F5_3WAY are priced in V1.",
       },
-      events: normalizedEvents,
+      events: eventsWithJustification,
       ai: aiAnalysis,
     });
 } catch (error) {

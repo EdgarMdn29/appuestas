@@ -57,7 +57,7 @@ function getGrade(
   if (
     evPct >= 5 &&
     edgePct >= 6 &&
-    confidence >= 90
+    confidence >= 80
   ) {
     return "⭐⭐⭐";
   }
@@ -65,14 +65,14 @@ function getGrade(
   if (
     evPct >= 5 &&
     edgePct >= 5 &&
-    confidence >= 80
+    confidence >= 70
   ) {
     return "⭐⭐";
   }
 
   if (
     evPct >= 3 &&
-    confidence >= 70
+    confidence >= 60
   ) {
     return "⭐";
   }
