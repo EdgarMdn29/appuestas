@@ -44,3 +44,12 @@ create index if not exists betting_picks_result_idx
 
 comment on table public.betting_picks is
   'Immutable historical record of APPuestas recommendations and their eventual results.';
+
+alter table public.betting_picks enable row level security;
+
+-- Server routes use the service_role client for reads, inserts, and settlement updates.
+-- Client roles do not need direct access to this table.
+drop policy if exists "Allow read betting picks" on public.betting_picks;
+revoke all privileges on table public.betting_picks from public, anon, authenticated;
+revoke all privileges on table public.betting_picks from service_role;
+grant select, insert, update on table public.betting_picks to service_role;
