@@ -23,6 +23,10 @@
     {
       "path": "/api/cron/odds/mlb?slot=17",
       "schedule": "0 23 * * *"
+    },
+    {
+      "path": "/api/cron/nfl",
+      "schedule": "0 12 * * *"
     }
   ]
 }
